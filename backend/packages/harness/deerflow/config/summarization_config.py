@@ -1,8 +1,11 @@
 """Configuration for conversation summarization."""
 
+import logging
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 ContextSizeType = Literal["fraction", "tokens", "messages"]
 DEFAULT_SKILL_FILE_READ_TOOL_NAMES: tuple[str, ...] = ("read_file", "read", "view", "cat")
@@ -66,7 +69,37 @@ _summarization_config: SummarizationConfig = SummarizationConfig()
 
 
 def get_summarization_config() -> SummarizationConfig:
-    """Get the current summarization configuration."""
+    """Get the current summarization configuration.
+
+    ``_summarization_config`` is only refreshed as a side effect of
+    ``get_app_config()`` reloading (via ``_apply_singleton_configs`` ->
+    ``load_summarization_config_from_dict``). A reader that reaches
+    summarization config without going through ``get_app_config()`` first
+    would otherwise see a stale ``summarization.enabled`` after a
+    ``config.yaml`` edit, even though ``summarization.*`` is documented as
+    hot-reloadable. Trigger the same signature-checked reload here so the
+    singleton follows the config file.
+
+    If ``get_app_config()`` has never been called (``_app_config`` is
+    ``None``), there is no stale config to refresh, so we keep the
+    pre-existing behaviour of returning the in-memory singleton. This avoids
+    picking up a config file as a side effect of the first access, which
+    would break callers that expect module-level defaults (e.g. unit tests).
+    """
+    # Lazy import: app_config imports this module, so a top-level import cycles.
+    from .app_config import _app_config, get_app_config
+
+    if _app_config is not None:
+        try:
+            get_app_config()
+        except Exception:
+            # If the config file is transiently broken (invalid YAML, schema
+            # violation, missing env var, etc.), keep the last-good singleton
+            # so an in-flight turn completes normally instead of crashing.
+            logger.warning(
+                "Failed to reload app config from get_summarization_config(); falling back to cached summarization config.",
+                exc_info=True,
+            )
     return _summarization_config
 
 

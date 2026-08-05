@@ -800,3 +800,63 @@ def test_get_memory_config_falls_back_on_broken_config(tmp_path, monkeypatch):
         assert get_memory_config().enabled is False
     finally:
         _reset_config_singletons()
+
+
+def test_get_summarization_config_self_syncs_without_prior_get_app_config(tmp_path, monkeypatch):
+    """get_summarization_config() follows config.yaml edits like get_memory_config().
+
+    ``summarization.*`` is documented as hot-reloadable, but the singleton only
+    refreshed as a side effect of get_app_config(). A reader reaching the
+    getter directly would see the stale value; this pins the self-sync.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+
+    _write_config_with_sections(config_path, {"summarization": {"enabled": False}})
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    reset_app_config()
+
+    try:
+        get_app_config()
+        assert get_summarization_config().enabled is False
+
+        _write_config_with_sections(config_path, {"summarization": {"enabled": True}})
+        next_mtime = config_path.stat().st_mtime + 5
+        os.utime(config_path, (next_mtime, next_mtime))
+
+        assert get_summarization_config().enabled is True
+    finally:
+        _reset_config_singletons()
+
+
+def test_get_subagents_app_config_self_syncs_without_prior_get_app_config(tmp_path, monkeypatch):
+    """get_subagents_app_config() follows config.yaml edits like get_memory_config().
+
+    ``subagents.*`` is documented as hot-reloadable, but the singleton only
+    refreshed as a side effect of get_app_config(). A reader reaching the
+    getter directly would see the stale value; this pins the self-sync.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+
+    _write_config_with_sections(config_path, {"subagents": {"max_total_per_run": 6}})
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    reset_app_config()
+
+    try:
+        get_app_config()
+        assert get_subagents_app_config().max_total_per_run == 6
+
+        _write_config_with_sections(config_path, {"subagents": {"max_total_per_run": 2}})
+        next_mtime = config_path.stat().st_mtime + 5
+        os.utime(config_path, (next_mtime, next_mtime))
+
+        assert get_subagents_app_config().max_total_per_run == 2
+    finally:
+        _reset_config_singletons()

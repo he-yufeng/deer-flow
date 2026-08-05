@@ -252,7 +252,36 @@ _subagents_config: SubagentsAppConfig = SubagentsAppConfig()
 
 
 def get_subagents_app_config() -> SubagentsAppConfig:
-    """Get the current subagents configuration."""
+    """Get the current subagents configuration.
+
+    ``_subagents_config`` is only refreshed as a side effect of
+    ``get_app_config()`` reloading (via ``_apply_singleton_configs`` ->
+    ``load_subagents_config_from_dict``). A reader that reaches subagents
+    config without going through ``get_app_config()`` first would otherwise
+    see stale ``subagents.*`` values after a ``config.yaml`` edit, even
+    though ``subagents.*`` is documented as hot-reloadable. Trigger the same
+    signature-checked reload here so the singleton follows the config file.
+
+    If ``get_app_config()`` has never been called (``_app_config`` is
+    ``None``), there is no stale config to refresh, so we keep the
+    pre-existing behaviour of returning the in-memory singleton. This avoids
+    picking up a config file as a side effect of the first access, which
+    would break callers that expect module-level defaults (e.g. unit tests).
+    """
+    # Lazy import: app_config imports this module, so a top-level import cycles.
+    from .app_config import _app_config, get_app_config
+
+    if _app_config is not None:
+        try:
+            get_app_config()
+        except Exception:
+            # If the config file is transiently broken (invalid YAML, schema
+            # violation, missing env var, etc.), keep the last-good singleton
+            # so an in-flight turn completes normally instead of crashing.
+            logger.warning(
+                "Failed to reload app config from get_subagents_app_config(); falling back to cached subagents config.",
+                exc_info=True,
+            )
     return _subagents_config
 
 
