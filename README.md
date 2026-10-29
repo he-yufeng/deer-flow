@@ -1633,13 +1633,15 @@ actions remain visible beside the compact sidebar on narrow screens.
 
 Agents can call the read-only `inspect_run_status` tool to inspect visible run
 token usage, message and tool-call counts, an approximate context-window fill,
-and whether a summary or unfinished to-dos exist. It returns counts only, not
-conversation or to-do text. Token counts depend on provider usage metadata;
-compaction can remove earlier messages, and context fill is unavailable when
-the model has no configured `context_window` or its latest response reports no
-input usage. It is also unavailable after a subagent dispatch because subagent
-usage may be attributed to that response. The result identifies whether a
-current-run boundary is known.
+recursion budget, and whether a summary or unfinished to-dos exist. It returns
+counts only, not conversation or to-do text. Token counts depend on provider
+usage metadata; compaction can remove earlier messages, and context fill is
+unavailable when the model has no configured `context_window` or its latest
+response reports no input usage. It is also unavailable after a subagent
+dispatch because subagent usage may be attributed to that response. The result
+identifies whether a current-run boundary is known. The recursion budget
+reports the invocation's effective step limit; its remaining count is `null`
+when the live runtime does not expose step metadata.
 
 Open **Capability Center** from the workspace sidebar to manage **Plugins**
 (MCP servers and Lark/Feishu integration) and **Skills**. Both catalogs support

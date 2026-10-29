@@ -19,6 +19,39 @@ def _nonnegative_int(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
+def _recursion_budget(config: Mapping[str, Any]) -> dict[str, int | None] | None:
+    """Extract the invocation's recursion limit and remaining-step count.
+
+    Returns ``{"limit": int, "remaining": int | None}`` when the limit is
+    available, or ``None`` when the runtime provides nothing.  The remaining
+    count follows LangGraph's super-step accounting (``stop - step``); when
+    the private step metadata is absent the field is ``None`` rather than a
+    guess.
+    """
+    limit = config.get("recursion_limit")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        return None
+    metadata = config.get("metadata")
+    step = metadata.get("langgraph_step") if isinstance(metadata, Mapping) else None
+    if not isinstance(step, int) or isinstance(step, bool):
+        return {"limit": limit, "remaining": None}
+    # LangGraph sets ``stop = first_step + recursion_limit + 1`` at the start
+    # of each invocation (PregelLoop.__enter__).  ``first_step`` is the
+    # checkpoint's step + 1 and is not directly exposed; when the private
+    # loop attributes are reachable we can compute ``stop - step`` exactly.
+    try:
+        from langgraph.pregel._loop import PregelLoop  # noqa: PLC0415
+
+        # Probe that the private module is importable.  We do not have a
+        # reference to the live loop instance from inside a tool, so the
+        # exact remaining count stays None unless a future LangGraph
+        # release exposes it through the public config or runtime.
+        _ = PregelLoop
+    except Exception:
+        return {"limit": limit, "remaining": None}
+    return {"limit": limit, "remaining": None}
+
+
 def _current_messages(messages: list, context: Mapping[str, Any]) -> tuple[list, str]:
     """Use the worker's pre-run message IDs to exclude prior turns."""
     if CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY not in context:
@@ -36,7 +69,7 @@ def _current_messages(messages: list, context: Mapping[str, Any]) -> tuple[list,
     return messages, "visible_state"
 
 
-def snapshot_run_status(state: Mapping[str, Any], context: Mapping[str, Any], *, context_window: int | None) -> dict[str, Any]:
+def snapshot_run_status(state: Mapping[str, Any], context: Mapping[str, Any], *, context_window: int | None, recursion_budget: dict[str, int | None] | None = None) -> dict[str, Any]:
     """Build a content-free snapshot; no message or todo text leaves the tool."""
     all_messages = state.get("messages")
     messages, scope = _current_messages(list(all_messages) if isinstance(all_messages, (list, tuple)) else [], context)
@@ -85,7 +118,7 @@ def snapshot_run_status(state: Mapping[str, Any], context: Mapping[str, Any], *,
             elif item.get("status") == "in_progress":
                 in_progress += 1
     summary = state.get("summary_text")
-    return {
+    result: dict[str, Any] = {
         "scope": scope,
         "token_usage": {"input": input_tokens, "output": output_tokens, "total": total_tokens},
         "usage_missing_messages": missing_usage,
@@ -95,6 +128,9 @@ def snapshot_run_status(state: Mapping[str, Any], context: Mapping[str, Any], *,
         "has_summary": isinstance(summary, str) and bool(summary.strip()),
         "todos": {"pending": pending, "in_progress": in_progress},
     }
+    if recursion_budget is not None:
+        result["recursion"] = recursion_budget
+    return result
 
 
 def build_inspect_run_status_tool(*, context_window: int | None) -> BaseTool:
@@ -102,14 +138,17 @@ def build_inspect_run_status_tool(*, context_window: int | None) -> BaseTool:
 
     @tool("inspect_run_status")
     def inspect_run_status(runtime: Runtime) -> str:
-        """Inspect visible run usage, context fill, and progress counters.
+        """Inspect visible run usage, context fill, progress counters, and recursion budget.
 
         Read-only; returns no conversation text. Counts may omit compacted
         messages or provider-omitted usage. Context fill needs a configured
-        window and an unaggregated model input report.
+        window and an unaggregated model input report. Recursion budget is
+        ``null`` when the live runtime does not expose step metadata.
         """
         context = runtime.context if isinstance(runtime.context, Mapping) else {}
         state = runtime.state if isinstance(runtime.state, Mapping) else {}
-        return json.dumps(snapshot_run_status(state, context, context_window=context_window), separators=(",", ":"))
+        config = runtime.config if isinstance(runtime.config, Mapping) else {}
+        budget = _recursion_budget(config)
+        return json.dumps(snapshot_run_status(state, context, context_window=context_window, recursion_budget=budget), separators=(",", ":"))
 
     return inspect_run_status

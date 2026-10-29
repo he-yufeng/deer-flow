@@ -141,5 +141,53 @@ def test_available_tools_registers_introspection_with_model_context_window():
         sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
     )
     tools = get_available_tools(include_mcp=False, model_name="status-model", app_config=config)
-
     assert sum(tool.name == "inspect_run_status" for tool in tools) == 1
+
+
+class TestRecursionBudget:
+    """Recursion budget reporting (issue #7645)."""
+
+    def test_recursion_budget_with_limit_and_step_metadata(self):
+        from deerflow.tools.builtins.inspect_run_status_tool import _recursion_budget
+
+        config = {"recursion_limit": 25, "metadata": {"langgraph_step": 3}}
+        budget = _recursion_budget(config)
+        assert budget is not None
+        assert budget["limit"] == 25
+        # remaining is None when the live loop instance is not reachable.
+        assert budget["remaining"] is None
+
+    def test_recursion_budget_returns_none_without_limit(self):
+        from deerflow.tools.builtins.inspect_run_status_tool import _recursion_budget
+
+        assert _recursion_budget({}) is None
+        assert _recursion_budget({"recursion_limit": "25"}) is None
+        assert _recursion_budget({"recursion_limit": 0}) is None
+        assert _recursion_budget({"recursion_limit": -1}) is None
+
+    def test_recursion_budget_without_step_metadata(self):
+        from deerflow.tools.builtins.inspect_run_status_tool import _recursion_budget
+
+        budget = _recursion_budget({"recursion_limit": 10})
+        assert budget == {"limit": 10, "remaining": None}
+
+    def test_snapshot_includes_recursion_when_budget_provided(self):
+        budget = {"limit": 25, "remaining": None}
+        snapshot = snapshot_run_status({}, {}, context_window=None, recursion_budget=budget)
+        assert snapshot["recursion"] == {"limit": 25, "remaining": None}
+
+    def test_snapshot_omits_recursion_when_budget_is_none(self):
+        snapshot = snapshot_run_status({}, {}, context_window=None)
+        assert "recursion" not in snapshot
+        # Verify the tool is still registered.
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.model_config import ModelConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+        from deerflow.tools import get_available_tools
+
+        config = AppConfig(
+            models=[ModelConfig(name="status-model", display_name="status-model", description=None, use="langchain_openai:ChatOpenAI", model="status-model", context_window=8192)],
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        )
+        tools = get_available_tools(include_mcp=False, model_name="status-model", app_config=config)
+        assert sum(tool.name == "inspect_run_status" for tool in tools) == 1
