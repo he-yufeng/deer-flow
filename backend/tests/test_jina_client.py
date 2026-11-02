@@ -428,11 +428,25 @@ def test_coerce_bool(value, default, expected):
         (False, 10, 10),
         (None, 10, 10),
         (1.5, 10, 10),
+        # Non-positive values are not a usable network timeout (#7823).
+        (0, 10, 10),
+        (-1, 10, 10),
+        ("0", 10, 10),
+        ("-1", 10, 10),
     ],
 )
 def test_coerce_timeout(value, default, expected):
     """_coerce_timeout accepts ints and numeric strings, rejecting bools and junk."""
     assert _coerce_timeout(value, default) == expected
+
+
+def test_coerce_timeout_falls_back_when_the_value_is_unrepresentable():
+    # A Python int is arbitrary precision, but the transport needs something
+    # it can turn into a float. 10**400 raised OverflowError at request time
+    # instead of being dealt with here (#7823).
+    assert _coerce_timeout(10**400, 10) == 10
+    assert _coerce_timeout(str(10**400), 10) == 10
+    assert _coerce_timeout(-(10**400), 10) == 10
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,5 @@
 import asyncio
+import math
 
 from langchain.tools import tool
 
@@ -22,16 +23,32 @@ def _coerce_bool(value: object, default: bool) -> bool:
 
 
 def _coerce_timeout(value: object, default: int) -> int:
+    """Coerce a configured Jina timeout to a usable positive whole number.
+
+    Unparseable values already fell back to ``default``. Non-positive values
+    and values the transport cannot represent are handled the same way rather
+    than being forwarded: a zero or negative timeout is not a meaningful
+    network timeout, and an integer too large for the request layer to turn
+    into a float raised OverflowError at request time instead of being dealt
+    with at configuration time (#7823). The fallback keeps this function's
+    existing contract: hand back a timeout that can be used, or the default.
+    """
     if isinstance(value, bool):
         return default
     if isinstance(value, int):
-        return value
-    if isinstance(value, str):
+        candidate = value
+    elif isinstance(value, str):
         try:
-            return int(value)
+            candidate = int(value)
         except ValueError:
             return default
-    return default
+    else:
+        return default
+    try:
+        usable = math.isfinite(float(candidate)) and candidate > 0
+    except OverflowError:
+        usable = False
+    return candidate if usable else default
 
 
 def _coerce_proxy(value: object) -> str | None:
