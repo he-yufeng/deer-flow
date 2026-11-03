@@ -704,25 +704,24 @@ class McpTaskRepository:
         tracking_degraded_after_errors: int,
     ) -> list[dict[str, Any]]:
         statuses = ("pending", "claimed", "launching", "retry", "dispatched")
-        stmt = (
-            select(McpTaskRow)
-            .where(
-                McpTaskRow.event_version > McpTaskRow.notified_version,
-                McpTaskRow.notification_status.in_(statuses),
-                or_(McpTaskRow.next_notification_at.is_(None), McpTaskRow.next_notification_at <= now),
-                or_(McpTaskRow.notification_lease_expires_at.is_(None), McpTaskRow.notification_lease_expires_at < now),
-            )
-            .order_by(McpTaskRow.next_notification_at.asc(), McpTaskRow.id.asc())
-            .limit(limit)
-            .with_for_update(skip_locked=True)
+        claimable = (
+            McpTaskRow.event_version > McpTaskRow.notified_version,
+            McpTaskRow.notification_status.in_(statuses),
+            or_(McpTaskRow.next_notification_at.is_(None), McpTaskRow.next_notification_at <= now),
+            or_(McpTaskRow.notification_lease_expires_at.is_(None), McpTaskRow.notification_lease_expires_at < now),
         )
+        stmt = select(McpTaskRow).where(*claimable).order_by(McpTaskRow.next_notification_at.asc(), McpTaskRow.id.asc()).limit(limit).with_for_update(skip_locked=True)
         async with self._sf() as session:
             rows = list((await session.execute(stmt)).scalars())
             expires_at = now + timedelta(seconds=lease_seconds)
-            claimed: list[McpTaskRow] = []
+            claimed_ids: list[str] = []
             for row in rows:
-                rebuild_snapshot = row.notification_status in ("pending", "claimed") or (row.notification_status == "retry" and row.dispatch_version != row.event_version)
-                if not rebuild_snapshot and row.dispatch_event is None and row.dispatch_version != row.event_version:
+                task_id = row.id
+                status_at_read = row.notification_status
+                event_version = row.event_version
+                dispatch_version = row.dispatch_version
+                rebuild_snapshot = status_at_read in ("pending", "claimed") or (status_at_read == "retry" and dispatch_version != event_version)
+                if not rebuild_snapshot and row.dispatch_event is None and dispatch_version != event_version:
                     # A legacy in-flight phase whose dispatch payload is gone, with
                     # a newer event already recorded: claim that newer event instead
                     # of consuming it. Terminal tasks stop polling, so a consumed
@@ -736,29 +735,25 @@ class McpTaskRepository:
                     if rebuild_snapshot
                     else row.dispatch_event
                 )
+                # SQLite ignores SELECT FOR UPDATE. Fence every mutation on the
+                # generation and phase actually read, in addition to claimability,
+                # so a peer claim or newly recorded event always wins the race.
+                generation_fence = (
+                    McpTaskRow.event_version == event_version,
+                    McpTaskRow.notification_status == status_at_read,
+                    McpTaskRow.dispatch_version.is_not_distinct_from(dispatch_version),
+                )
                 if event is None:
                     # The condition behind this snapshot resolved before delivery
                     # (for example tracking recovered, or an input_required prompt
                     # was answered), or the row carries an empty generation left by
-                    # a pre-fix claim. Consume only what was proven empty — the
-                    # current event version for a rebuild, the empty dispatch
-                    # generation otherwise — through a conditional UPDATE fenced on
-                    # the event version and phase this read saw. SQLite has no
-                    # ``SELECT FOR UPDATE``, so a newer event recorded after the
-                    # read must win: the fence then matches no row, this consume is
-                    # a no-op, and the newer event stays claimable. Clearing the
-                    # content fingerprint keeps an identical later event from being
-                    # suppressed by a snapshot that was never delivered.
-                    consumed_version = row.event_version if rebuild_snapshot else (row.dispatch_version if row.dispatch_version is not None else row.event_version)
-                    status_at_read = row.notification_status
-                    session.expunge(row)
+                    # a pre-fix claim. Consume only what was proven empty. Clearing
+                    # the content fingerprint keeps an identical later event from
+                    # being suppressed by a snapshot that was never delivered.
+                    consumed_version = event_version if rebuild_snapshot else (dispatch_version if dispatch_version is not None else event_version)
                     await session.execute(
                         update(McpTaskRow)
-                        .where(
-                            McpTaskRow.id == row.id,
-                            McpTaskRow.event_version == consumed_version,
-                            McpTaskRow.notification_status == status_at_read,
-                        )
+                        .where(McpTaskRow.id == task_id, *claimable, *generation_fence)
                         .values(
                             notified_version=consumed_version,
                             event_fingerprint=None,
@@ -776,21 +771,32 @@ class McpTaskRepository:
                         )
                     )
                     continue
-                row.notification_lease_owner = lease_owner
-                row.notification_lease_expires_at = expires_at
-                row.notification_lease_token = _new_claim_token()
+                values: dict[str, Any] = {
+                    "notification_lease_owner": lease_owner,
+                    "notification_lease_expires_at": expires_at,
+                    "notification_lease_token": _new_claim_token(),
+                    "updated_at": now,
+                }
                 if rebuild_snapshot:
-                    if row.dispatch_version != row.event_version:
-                        row.dispatch_attempt = 0
-                        row.notification_attempt_count = 0
-                    row.dispatch_version = row.event_version
-                    row.dispatch_event = event
-                    row.notification_run_id = None
-                    row.notification_status = "claimed"
-                row.updated_at = now
-                claimed.append(row)
+                    if dispatch_version != event_version:
+                        values["dispatch_attempt"] = 0
+                        values["notification_attempt_count"] = 0
+                    values.update(
+                        dispatch_version=event_version,
+                        dispatch_event=event,
+                        notification_run_id=None,
+                        notification_status="claimed",
+                    )
+                claimed_update = await session.execute(update(McpTaskRow).where(McpTaskRow.id == task_id, *claimable, *generation_fence).values(**values))
+                if claimed_update.rowcount:
+                    claimed_ids.append(task_id)
+            claimed: list[dict[str, Any]] = []
+            if claimed_ids:
+                refreshed = await session.execute(select(McpTaskRow).where(McpTaskRow.id.in_(claimed_ids)).execution_options(populate_existing=True))
+                rows_by_id = {row.id: row for row in refreshed.scalars()}
+                claimed = [self._row_to_dict(rows_by_id[task_id]) for task_id in claimed_ids]
             await session.commit()
-            return [self._row_to_dict(row) for row in claimed]
+            return claimed
 
     async def begin_notification_launch(
         self,

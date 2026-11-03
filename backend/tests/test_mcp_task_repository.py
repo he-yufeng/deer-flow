@@ -296,6 +296,45 @@ async def test_interleaved_reclaim_fences_inflight_notification_completion(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_sqlite_notification_claims_have_one_winner_when_reads_overlap(tmp_path, monkeypatch):
+    repo = await _make_repo(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    task_id = "overlapping-notification-claim"
+    await _create_working_task(repo, task_id=task_id, now=now)
+    poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    assert await repo.apply_snapshot(
+        task_id,
+        lease_owner="poller",
+        lease_token=poll[0]["lease_token"],
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+    claim_kwargs = {"lease_seconds": 60, "limit": 1, "tracking_degraded_after_errors": 3}
+    first_operation = repo.claim_notification_work(now=now, lease_owner="first", **claim_kwargs)
+    async with _pause_claim_mutation(monkeypatch, first_operation) as (first, resume):
+        second = asyncio.create_task(repo.claim_notification_work(now=now, lease_owner="second", **claim_kwargs))
+        await asyncio.wait({second}, timeout=0.2)
+        assert second.done(), "the competing claim did not finish while the first read was paused"
+        resume.set()
+        first_rows, second_rows = await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+
+    assert len(first_rows) + len(second_rows) == 1, "both workers received the same notification generation"
+    winner = (first_rows + second_rows)[0]
+    stored = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_lease_owner"] == winner["notification_lease_owner"]
+    assert stored["notification_lease_token"] == winner["notification_lease_token"]
+    assert stored["notification_status"] == "claimed"
+
+
+@pytest.mark.asyncio
 async def test_legacy_task_writer_leaves_thread_incarnation_null(tmp_path):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
