@@ -415,6 +415,26 @@ def test_release_parks_and_same_scope_reclaims_without_create(installed) -> None
     assert len(fake.created) == 1
 
 
+def test_release_keeps_shared_machine_active_until_last_claim(installed) -> None:
+    provider, fake = installed
+    sandbox_id = provider.acquire("thread", user_id="owner")
+    assert provider.acquire("thread", user_id="owner") == sandbox_id
+    assert provider._claims[sandbox_id] == 2
+
+    provider.release(sandbox_id)
+
+    assert provider.get(sandbox_id) is not None
+    assert sandbox_id not in provider._warm_pool
+    assert provider._claims[sandbox_id] == 1
+
+    provider.release(sandbox_id)
+
+    assert provider.get(sandbox_id) is None
+    assert sandbox_id in provider._warm_pool
+    assert sandbox_id not in provider._claims
+    assert len(fake.created) == 1
+
+
 def test_unhealthy_warm_machine_is_deleted_and_replaced(installed) -> None:
     provider, fake = installed
     sandbox_id = provider.acquire("thread", user_id="owner")

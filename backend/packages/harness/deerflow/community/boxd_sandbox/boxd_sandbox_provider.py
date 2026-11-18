@@ -727,6 +727,11 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
                 return
         try:
             with self._acquire_serializer.hold(sandbox_id):
+                with self._lock:
+                    remaining = self._claims.get(sandbox_id, 1) - 1
+                    self._claims[sandbox_id] = remaining
+                    if remaining > 0:
+                        return
                 self._release_scope_locked(sandbox_id)
         except AcquireSerializerClosed:
             # reset/shutdown closed the serializer after the check above.
